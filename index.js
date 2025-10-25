@@ -6,16 +6,21 @@ const express = require('express');
 // Retrieve environment variables from Render Environment Variables
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const WEB_APP_URL = process.env.WEB_APP_URL;
-const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; 
+// --- MODIFIED: Renamed to ADMIN_ROLE_IDS and will contain a comma-separated list of IDs ---
+const ADMIN_ROLE_IDS_STRING = process.env.ADMIN_ROLE_IDS; 
 
 // --- NEW/MODIFIED CHANNEL IDs ---
 const GOLD_CHANNEL_ID = process.env.GOLD_CHANNEL_ID; 
 const DAMAGE_CATEGORY_ID = process.env.DAMAGE_CATEGORY_ID; // The ID of the Forum/Category holding the damage threads
 const VERIFICATION_CHANNEL_ID = process.env.VERIFICATION_CHANNEL_ID; // The central channel where all pending logs are posted
 
+// --- CRITICAL: Split the string of IDs into an array for easy checking ---
+const ADMIN_ROLE_IDS = ADMIN_ROLE_IDS_STRING ? ADMIN_ROLE_IDS_STRING.split(',').map(id => id.trim()) : [];
+
+
 // Ensure all environment variables are set
-if (!DISCORD_TOKEN || !GOLD_CHANNEL_ID || !DAMAGE_CATEGORY_ID || !VERIFICATION_CHANNEL_ID || !WEB_APP_URL || !ADMIN_ROLE_ID) {
-    console.error("ERROR: One or more required environment variables are missing.");
+if (!DISCORD_TOKEN || !GOLD_CHANNEL_ID || !DAMAGE_CATEGORY_ID || !VERIFICATION_CHANNEL_ID || !WEB_APP_URL || ADMIN_ROLE_IDS.length === 0) {
+    console.error("ERROR: One or more required environment variables are missing, or ADMIN_ROLE_IDS is empty.");
     process.exit(1);
 }
 
@@ -100,7 +105,6 @@ client.on('messageCreate', async message => {
         if (!value || player.length < 1) return;
         
         // Do NOT delete the damage message, as the screenshot needs to stay for audit purposes.
-        // We will just send a link to the message for easy verification.
     }
     
     // If neither channel matched, exit
@@ -114,13 +118,21 @@ client.on('messageCreate', async message => {
         return;
     }
 
-    // Construct the message to send to the central verification channel
-    const verificationMessageContent = 
+    let verificationMessageContent = 
         `**[${type.toUpperCase()}]** Log Submitted by **${message.author.username}**:\n` +
         `Player: \`${player}\`\n` +
         `Value: \`${value}\`\n` +
         `Source: ${sourceChannel.name} (<#${sourceChannel.id}>)\n` +
-        `[Go to Original Message](${message.url})`; 
+        `[Go to Original Message](${message.url})`;
+        
+    // --- NEW: Add the screenshot URL for damage logs if one exists ---
+    if (type === 'damage' && message.channel.parentId === DAMAGE_CATEGORY_ID) {
+        const attachment = message.attachments.first();
+        if (attachment) {
+            // Add the URL to the content. Discord will automatically create an embed/preview below the text.
+            verificationMessageContent += `\n\n**-- Screenshot for Verification --**\n${attachment.url}`;
+        }
+    }
 
     try {
         const sentMessage = await verificationChannel.send({
@@ -175,8 +187,13 @@ client.on('messageReactionAdd', async (reaction, user) => {
             return null;
         });
 
-        // --- CHECK ADMIN ROLE ---
-        if (!member || !member.roles.cache.has(ADMIN_ROLE_ID)) {
+        // --- MODIFIED: CHECK MULTIPLE ADMIN ROLES ---
+        if (!member) return; 
+
+        // Check if the member has ANY of the roles listed in ADMIN_ROLE_IDS
+        const isAuthorized = ADMIN_ROLE_IDS.some(roleId => member.roles.cache.has(roleId));
+
+        if (!isAuthorized) {
             console.log(`${user.tag} reacted but is not an authorized Admin. Ignoring.`);
             return; 
         }
