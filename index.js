@@ -5,13 +5,17 @@ const express = require('express');
 
 // Retrieve environment variables from Render Environment Variables
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const ADMIN_CHANNEL_ID = process.env.ADMIN_CHANNEL_ID; 
 const WEB_APP_URL = process.env.WEB_APP_URL;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; 
 
+// --- NEW/MODIFIED CHANNEL IDs ---
+const GOLD_CHANNEL_ID = process.env.GOLD_CHANNEL_ID; 
+const DAMAGE_CATEGORY_ID = process.env.DAMAGE_CATEGORY_ID; // The ID of the Forum/Category holding the damage threads
+const VERIFICATION_CHANNEL_ID = process.env.VERIFICATION_CHANNEL_ID; // The central channel where all pending logs are posted
+
 // Ensure all environment variables are set
-if (!DISCORD_TOKEN || !ADMIN_CHANNEL_ID || !WEB_APP_URL || !ADMIN_ROLE_ID) {
-    console.error("ERROR: One or more required environment variables (DISCORD_TOKEN, ADMIN_CHANNEL_ID, WEB_APP_URL, ADMIN_ROLE_ID) are missing.");
+if (!DISCORD_TOKEN || !GOLD_CHANNEL_ID || !DAMAGE_CATEGORY_ID || !VERIFICATION_CHANNEL_ID || !WEB_APP_URL || !ADMIN_ROLE_ID) {
+    console.error("ERROR: One or more required environment variables are missing.");
     process.exit(1);
 }
 
@@ -21,20 +25,19 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMessageReactions // Required to monitor reactions
+        GatewayIntentBits.GuildMessageReactions 
     ],
-    partials: [Partials.Message, Partials.Channel, Partials.Reaction] // Required for reacting to messages not in cache
+    partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-// A temporary place to store messages waiting for verification (Key: messageId)
-// This will reset if the bot restarts, but is fine for simple verification flow.
+// A temporary place to store verification data (Key: Verification Message ID -> Value: { type, player, value })
+// We store this data on the NEW message in the verification channel.
 const pendingVerifications = new Map();
 
 // --- 2. BOT READY & SERVER STARTUP (For Render's health check) ---
 
 client.on('ready', () => {
     console.log(`Bot logged in as ${client.user.tag}!`);
-    // Start the server to handle Render's health checks
     startServer();
 });
 
@@ -44,11 +47,9 @@ client.on('ready', () => {
  */
 function startServer() {
     const app = express();
-    // Render typically uses the PORT environment variable
     const port = process.env.PORT || 3000; 
 
     app.get('/', (req, res) => {
-        // This is the endpoint Render will hit to check if the bot is alive
         res.send('Bot is awake and running!');
     });
 
@@ -57,63 +58,103 @@ function startServer() {
     });
 }
 
-// --- 3. LISTENING FOR NEW ADMIN MESSAGES ---
+// --- 3. LISTENING FOR NEW MESSAGES (Routes Logs to Central Channel) ---
 
 client.on('messageCreate', async message => {
-    // Only process messages in the specific Admin Verification Channel
-    if (message.channelId !== ADMIN_CHANNEL_ID) return;
     
     // Ignore messages from the bot itself
     if (message.author.bot) return;
 
-    // Expected format: [type]: [player] [value]
-    // Example: "damage: Zeta 103T" or "gold: Ryu 500"
-    const content = message.content.trim().split(':');
+    let type = null;
+    let player = null;
+    let value = null;
+    let sourceChannel = message.channel; // Store the original channel object
+
+    // --- LOGIC FOR GOLD DONATIONS (Simple admin channel) ---
+    if (message.channelId === GOLD_CHANNEL_ID) {
+        // Gold format: gold: PlayerName Value
+        const content = message.content.trim().split(':');
+        if (content.length < 2) return; 
+
+        const parsedType = content[0].trim().toLowerCase(); 
+        const parts = content[1].trim().split(/\s+/); 
+        
+        if (parsedType !== 'gold' || parts.length < 2) return;
+
+        type = parsedType;
+        player = parts[0]; 
+        value = parts[1];
+        
+        // Delete the original message to keep the Gold Channel clean, as we are re-posting it.
+        message.delete().catch(e => console.error("Could not delete gold message:", e));
+    } 
+    // --- LOGIC FOR DAMAGE LOGS (Inside Forum Channel threads) ---
+    else if (message.channel.parentId === DAMAGE_CATEGORY_ID) {
+        // Damage format: Player posts value (e.g., "103T") and a screenshot in their own thread.
+        
+        type = 'damage';
+        player = message.channel.name.trim(); // Player name is the thread title
+        value = message.content.trim().split(/\s+/)[0]; // Grab the first word/number as the damage value
+
+        // Basic checks
+        if (!value || player.length < 1) return;
+        
+        // Do NOT delete the damage message, as the screenshot needs to stay for audit purposes.
+        // We will just send a link to the message for easy verification.
+    }
     
-    if (content.length < 2) {
-        // Optionally inform the admin if the format is wrong
-        // message.reply('Please use the format: type: player value');
-        console.log(`Message skipped: Incorrect format. Content: ${message.content}`);
+    // If neither channel matched, exit
+    if (!type) return;
+    
+    // --- CRITICAL STEP: SEND MESSAGE TO VERIFICATION CHANNEL ---
+
+    const verificationChannel = await client.channels.fetch(VERIFICATION_CHANNEL_ID);
+    if (!verificationChannel) {
+        console.error("Verification channel not found!");
         return;
     }
 
-    const type = content[0].trim().toLowerCase(); // 'damage' or 'gold'
-    const parts = content[1].trim().split(/\s+/); // Splits by any whitespace
-    
-    if (parts.length < 2) {
-        console.log(`Message skipped: Missing player or value. Content: ${message.content}`);
-        return;
-    }
-    
-    const player = parts[0];
-    const value = parts[1];
-    
-    if (type === 'damage' || type === 'gold') {
-        // Store the verification details
-        pendingVerifications.set(message.id, {
+    // Construct the message to send to the central verification channel
+    const verificationMessageContent = 
+        `**[${type.toUpperCase()}]** Log Submitted by **${message.author.username}**:\n` +
+        `Player: \`${player}\`\n` +
+        `Value: \`${value}\`\n` +
+        `Source: ${sourceChannel.name} (<#${sourceChannel.id}>)\n` +
+        `[Go to Original Message](${message.url})`; 
+
+    try {
+        const sentMessage = await verificationChannel.send({
+            content: verificationMessageContent
+        });
+        
+        // Store the data using the *new* verification message's ID as the key
+        pendingVerifications.set(sentMessage.id, {
             type,
             player,
             value
         });
         
-        // React with the checkmark to signal it's ready for verification
-        try {
-            await message.react('✅');
-            console.log(`Set up pending verification for ${player} (${type}). Waiting for checkmark.`);
-        } catch (error) {
-            console.error('Failed to react with checkmark:', error);
-        }
+        // React to the NEW message so admins can verify it easily
+        await sentMessage.react('✅');
+        
+        console.log(`Log posted to verification channel for ${player} (${type}). Waiting for checkmark.`);
+
+    } catch (error) {
+        console.error('Failed to post or react to verification channel:', error);
     }
 });
 
 
-// --- 4. LISTENING FOR CHECKMARK REACTION ---
+// --- 4. LISTENING FOR CHECKMARK REACTION (Only in the Central Channel) ---
 
 client.on('messageReactionAdd', async (reaction, user) => {
-    // Check if the reaction is the checkmark emoji and it's not the bot
+    // Only process checkmarks and ignore bot's reactions
     if (reaction.emoji.name !== '✅' || user.bot) return;
+    
+    // --- CRITICAL: Only proceed if the reaction is in the central verification channel ---
+    if (reaction.message.channelId !== VERIFICATION_CHANNEL_ID) return;
 
-    // Fetch the full message data if it's not cached
+    // Fetch the message if partial
     if (reaction.partial) {
         try {
             await reaction.fetch();
@@ -122,29 +163,22 @@ client.on('messageReactionAdd', async (reaction, user) => {
             return;
         }
     }
-
-    // Check if the message is in the Admin Verification Channel
-    if (reaction.message.channelId !== ADMIN_CHANNEL_ID) return;
-
-    // Find the message's ID in our pending list
+    
+    // Check if the message ID exists in our pending list
     if (pendingVerifications.has(reaction.message.id)) {
         
         const guild = reaction.message.guild;
-        
-        // Ensure we are inside a guild context
         if (!guild) return;
         
-        // Fetch the guild member to check roles
         const member = await guild.members.fetch(user.id).catch(err => {
             console.error(`Could not fetch member ${user.id}: ${err.message}`);
             return null;
         });
 
         // --- CHECK ADMIN ROLE ---
-        // Verify the user who reacted has the required Admin Role ID
         if (!member || !member.roles.cache.has(ADMIN_ROLE_ID)) {
             console.log(`${user.tag} reacted but is not an authorized Admin. Ignoring.`);
-            return; // Stop if the user is not an admin
+            return; 
         }
         
         const entry = pendingVerifications.get(reaction.message.id);
@@ -155,13 +189,17 @@ client.on('messageReactionAdd', async (reaction, user) => {
         if (success) {
             // Remove from the pending list after successful submission
             pendingVerifications.delete(reaction.message.id);
-            // Optionally remove the checkmark reaction to clean up the channel
-            reaction.remove().catch(console.error); 
+            
+            // Edit the message to show it was completed
+            reaction.message.edit(`~~${reaction.message.content}~~ \n\n**✅ VERIFIED** by ${user.username}`).catch(console.error);
+            
+            // Remove all reactions (including the checkmark)
+            reaction.message.reactions.removeAll().catch(console.error);
         }
     }
 });
 
-// --- 5. WEBHOOK SENDER ---
+// --- 5. WEBHOOK SENDER (Slight modification for error reporting) ---
 
 /**
  * Sends the verified data to the Google Apps Script Web App URL.
@@ -195,8 +233,8 @@ async function sendDataToSheets(data, verifier) {
             return true;
         } else {
             console.error(`❌ Sheets Error: ${resultText}`);
-            // Send a warning back to Discord if the webhook fails
-            const channel = await client.channels.fetch(ADMIN_CHANNEL_ID);
+            // Send a warning back to the central verification channel if the webhook fails
+            const channel = await client.channels.fetch(VERIFICATION_CHANNEL_ID); 
             if (channel) {
                 channel.send(`⚠️ **Verification Failed** for ${data.player} (${data.value}). Google Sheets returned an error: \`${resultText}\``);
             }
