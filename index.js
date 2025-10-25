@@ -35,7 +35,7 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-// A temporary place to store verification data (Key: Verification Message ID -> Value: { type, player, value })
+// A temporary place to store verification data (Key: Verification Message ID -> Value: { type, player, value, originalTimestampMs })
 // We store this data on the NEW message in the verification channel.
 const pendingVerifications = new Map();
 
@@ -74,6 +74,9 @@ client.on('messageCreate', async message => {
     let player = null;
     let value = null;
     let sourceChannel = message.channel; // Store the original channel object
+    
+    // Get the original message's creation timestamp (in milliseconds)
+    const originalTimestampMs = message.createdTimestamp;
 
     // --- LOGIC FOR GOLD DONATIONS (Simple admin channel) ---
     if (message.channelId === GOLD_CHANNEL_ID) {
@@ -117,11 +120,15 @@ client.on('messageCreate', async message => {
         console.error("Verification channel not found!");
         return;
     }
+    
+    // Format the timestamp for Discord display (Discord requires seconds, not milliseconds)
+    const discordTimestampFormat = `<t:${Math.floor(originalTimestampMs / 1000)}:f>`;
 
     let verificationMessageContent = 
         `**[${type.toUpperCase()}]** Log Submitted by **${message.author.username}**:\n` +
         `Player: \`${player}\`\n` +
         `Value: \`${value}\`\n` +
+        `**Time Submitted:** ${discordTimestampFormat}\n` + // <-- ADDED SUBMISSION TIME
         `Source: ${sourceChannel.name} (<#${sourceChannel.id}>)\n` +
         `[Go to Original Message](${message.url})`;
         
@@ -143,7 +150,8 @@ client.on('messageCreate', async message => {
         pendingVerifications.set(sentMessage.id, {
             type,
             player,
-            value
+            value,
+            originalTimestampMs // <-- TIMESTAMP STORED HERE
         });
         
         // React to the NEW message so admins can verify it easily
@@ -201,7 +209,8 @@ client.on('messageReactionAdd', async (reaction, user) => {
         const entry = pendingVerifications.get(reaction.message.id);
         
         // Send the verified data to Google Sheets
-        const success = await sendDataToSheets(entry, user.username);
+        // PASS THE ORIGINAL TIMESTAMP TO THE WEBHOOK
+        const success = await sendDataToSheets(entry, user.username, entry.originalTimestampMs);
 
         if (success) {
             // Remove from the pending list after successful submission
@@ -222,14 +231,16 @@ client.on('messageReactionAdd', async (reaction, user) => {
  * Sends the verified data to the Google Apps Script Web App URL.
  * @param {Object} data The structured entry data (type, player, value).
  * @param {string} verifier The Discord username of the admin who added the checkmark.
+ * @param {number} originalTimestampMs The timestamp of the original message submission.
  * @returns {boolean} True if the webhook was successful.
  */
-async function sendDataToSheets(data, verifier) {
+async function sendDataToSheets(data, verifier, originalTimestampMs) {
     const payload = {
         type: data.type,
         player: data.player,
         value: data.value,
-        verifier: verifier 
+        verifier: verifier,
+        originalTimestampMs: originalTimestampMs // <-- NEW DATA SENT TO GOOGLE SHEET
     };
 
     console.log(`Attempting to send verified data for ${data.player} (${data.type})...`);
