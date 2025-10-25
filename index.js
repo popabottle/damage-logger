@@ -98,13 +98,24 @@ client.on('messageCreate', async message => {
     } 
     // --- LOGIC FOR DAMAGE LOGS (Inside Forum Channel threads) ---
     else if (message.channel.parentId === DAMAGE_CATEGORY_ID) {
-        // Damage format: Player posts value (e.g., "103T") and a screenshot in their own thread.
+        // Damage format: Player posts value (e.g., "103T", "50 T") and a screenshot in their own thread.
         
+        // 1. FILTERING: Must contain at least one attachment (screenshot) to be considered a log.
+        const hasAttachment = message.attachments.size > 0;
+        if (!hasAttachment) {
+            // Ignore messages without a screenshot; these are likely discussion/spam.
+            return;
+        }
+
         type = 'damage';
         player = message.channel.name.trim(); // Player name is the thread title
-        value = message.content.trim().split(/\s+/)[0]; // Grab the first word/number as the damage value
+        
+        // --- MODIFIED: Handle the space between number and unit ---
+        let rawValue = message.content.trim().split(/\s+/)[0]; 
+        // Remove spaces (e.g., "50 T" -> "50T", "1.2 M" -> "1.2M")
+        value = rawValue.replace(/\s/g, ''); 
 
-        // Basic checks
+        // 2. FILTERING: Basic checks to ensure a value was found after processing
         if (!value || player.length < 1) return;
         
         // Do NOT delete the damage message, as the screenshot needs to stay for audit purposes.
