@@ -1,0 +1,13 @@
+{
+  "name": "game-log-webhook-bot",
+  "version": "1.0.0",
+  "description": "Discord bot to verify game logs and send data to Google Sheets via webhook.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.17.1",
+    "express": "^4.19.2"
+  }
+}
