@@ -91,14 +91,19 @@ client.on('messageCreate', async message => {
 
         type = parsedType;
         player = parts[0]; 
-        value = parts[1];
+        
+        // --- FIX COMMAS/SPACES ON BOT SIDE FOR CLEANER SHEETS TRANSFER ---
+        const rawValue = parts[1];
+        // Remove all commas and spaces from the value string
+        value = rawValue.replace(/[\s,]/g, ''); 
+        // ----------------------------------------------------------------
         
         // Delete the original message to keep the Gold Channel clean, as we are re-posting it.
         message.delete().catch(e => console.error("Could not delete gold message:", e));
     } 
     // --- LOGIC FOR DAMAGE LOGS (Inside Forum Channel threads) ---
     else if (message.channel.parentId === DAMAGE_CATEGORY_ID) {
-        // Damage format: Player posts value (e.g., "103T", "50 T") and a screenshot in their own thread.
+        // Damage format: Player posts value (e.g., "103T", "50 T", "134Tril") and a screenshot in their own thread.
         
         // 1. FILTERING: Must contain at least one attachment (screenshot) to be considered a log.
         const hasAttachment = message.attachments.size > 0;
@@ -110,12 +115,29 @@ client.on('messageCreate', async message => {
         type = 'damage';
         player = message.channel.name.trim(); // Player name is the thread title
         
-        // --- MODIFIED: Handle the space between number and unit ---
-        let rawValue = message.content.trim().split(/\s+/)[0]; 
-        // Remove spaces (e.g., "50 T" -> "50T", "1.2 M" -> "1.2M")
-        value = rawValue.replace(/\s/g, ''); 
-
-        // 2. FILTERING: Basic checks to ensure a value was found after processing
+        // --- MODIFIED: Robust Regex for Damage Value Extraction ---
+        // This regex searches the entire content for:
+        // 1. A number (integer or decimal, e.g., 134, 1.2)
+        // 2. Optional spaces
+        // 3. A unit: T, Tril, B, Bil, M, Million. (Case-insensitive)
+        const damageRegex = /(\d+\.?\d*)\s*(T|Tril|B|Bil|M|Million|QD)\b/i;
+        const match = message.content.match(damageRegex);
+        
+        if (match) {
+            // match[1] is the number (e.g., 134, 1.2)
+            // match[2] is the unit (e.g., Tril, B, M)
+            
+            // Reconstruct the value in the standard short format (e.g., "134Tril" -> "134T") for the Google Sheet to read easily.
+            let unit = match[2].toUpperCase();
+            if (unit === 'TRIL') unit = 'T';
+            if (unit === 'BIL' || unit === 'BILLION') unit = 'B';
+            if (unit === 'MILLION') unit = 'M';
+            
+            // Format the final value for the Google Sheet
+            value = `${match[1]}${unit}`;
+        }
+        
+        // 2. FILTERING: If no damage value was found after the regex check, exit.
         if (!value || player.length < 1) return;
         
         // Do NOT delete the damage message, as the screenshot needs to stay for audit purposes.
@@ -138,8 +160,8 @@ client.on('messageCreate', async message => {
     let verificationMessageContent = 
         `**[${type.toUpperCase()}]** Log Submitted by **${message.author.username}**:\n` +
         `Player: \`${player}\`\n` +
-        `Value: \`${value}\`\n` +
-        `**Time Submitted:** ${discordTimestampFormat}\n` + // <-- ADDED SUBMISSION TIME
+        `Value: \`${value}\`\n` + // <-- Value is now in the standardized format (e.g., 134T)
+        `**Time Submitted:** ${discordTimestampFormat}\n` + 
         `Source: ${sourceChannel.name} (<#${sourceChannel.id}>)\n` +
         `[Go to Original Message](${message.url})`;
         
@@ -162,7 +184,7 @@ client.on('messageCreate', async message => {
             type,
             player,
             value,
-            originalTimestampMs // <-- TIMESTAMP STORED HERE
+            originalTimestampMs 
         });
         
         // React to the NEW message so admins can verify it easily
@@ -249,7 +271,7 @@ async function sendDataToSheets(data, verifier, originalTimestampMs) {
     const payload = {
         type: data.type,
         player: data.player,
-        value: data.value,
+        value: data.value, // This value is now comma/space free for gold, and unit-based for damage
         verifier: verifier,
         originalTimestampMs: originalTimestampMs // <-- NEW DATA SENT TO GOOGLE SHEET
     };
